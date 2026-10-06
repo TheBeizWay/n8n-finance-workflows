@@ -1,0 +1,97 @@
+{
+  "name": "Supplier bill checks (five checks, human approval)",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "When clicking 'Test workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "2b6104bf-be86-4b7b-8de3-4beb0f8227c9"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Made-up bills for a fictional joinery business. In real use, replace this node with\n// your accounting system's bills (for example the Xero node: Get many invoices, type ACCPAY).\nconst bills = [\n  { invoice: \"INV-2201\", supplier: \"Timber Co\", date: \"2026-10-01\", amount: 4280, unit_price: 42.80, bank_account: \"BSB 000-001 ACC 11111111\" },\n  { invoice: \"INV-2202\", supplier: \"Fixings Direct\", date: \"2026-10-01\", amount: 612, unit_price: 6.80, bank_account: \"BSB 000-002 ACC 22222222\" },\n  { invoice: \"INV-2203\", supplier: \"Harbour Electrical\", date: \"2026-10-02\", amount: 18400, unit_price: null, bank_account: \"BSB 000-003 ACC 33333333\" },\n  { invoice: \"INV-2204\", supplier: \"Timber Co\", date: \"2026-10-03\", amount: 4280, unit_price: 42.80, bank_account: \"BSB 000-001 ACC 11111111\" },\n  { invoice: \"INV-2205\", supplier: \"Coastal Plumbing\", date: \"2026-10-03\", amount: 2950, unit_price: null, bank_account: \"BSB 000-009 ACC 99999999\" },\n  { invoice: \"INV-2206\", supplier: \"Office Supplies AU\", date: \"2026-10-04\", amount: 186, unit_price: null, bank_account: \"BSB 000-005 ACC 55555555\" },\n  { invoice: \"INV-2207\", supplier: \"Fixings Direct\", date: \"2026-10-04\", amount: 745, unit_price: 7.45, bank_account: \"BSB 000-002 ACC 22222222\" },\n  { invoice: \"INV-2208\", supplier: \"Waste Services\", date: \"2026-10-05\", amount: 390, unit_price: null, bank_account: \"BSB 000-006 ACC 66666666\" },\n];\nreturn bills.map(b => ({ json: b }));"
+      },
+      "name": "Sample bills (synthetic)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "be8fd01c-6c9d-46e5-ba45-6a53628af856"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Supplier master: bank details on file and last unit price. In real use, load this from\n// your accounting contacts or a sheet you control. Made-up values only.\nconst suppliers = [\n  { supplier: \"Timber Co\", bank_account: \"BSB 000-001 ACC 11111111\", last_unit_price: 42.80 },\n  { supplier: \"Fixings Direct\", bank_account: \"BSB 000-002 ACC 22222222\", last_unit_price: 6.70 },\n  { supplier: \"Harbour Electrical\", bank_account: \"BSB 000-003 ACC 33333333\", last_unit_price: null },\n  { supplier: \"Coastal Plumbing\", bank_account: \"BSB 000-004 ACC 44444444\", last_unit_price: null },\n  { supplier: \"Office Supplies AU\", bank_account: \"BSB 000-005 ACC 55555555\", last_unit_price: null },\n  { supplier: \"Waste Services\", bank_account: \"BSB 000-006 ACC 66666666\", last_unit_price: null },\n];\n\n// Shared logic for the \"Run five checks\" Code node. Kept here so it can be tested outside n8n.\nfunction runChecks(bills, suppliers, opts = {}) {\n  const LIMIT = opts.approvalLimit ?? 10000;      // dollars; bills above this need a second approver\n  const PRICE_JUMP = opts.priceJump ?? 0.10;       // flag unit price rises above 10% on the last order\n  const DUP_DAYS = opts.duplicateWindowDays ?? 30; // same supplier + amount within this many days\n  const bySupplier = Object.fromEntries(suppliers.map(s => [s.supplier, s]));\n  const day = d => new Date(d + \"T00:00:00Z\").getTime() / 864e5;\n  return bills.map((b, i) => {\n    const reasons = [], review = [];\n    const s = bySupplier[b.supplier];\n    if (!s) reasons.push(\"New supplier: check ABN and that someone ordered this\");\n    if (s && b.bank_account !== s.bank_account) reasons.push(\"Bank details differ from the ones on file: phone the supplier on a number you already have\");\n    if (b.amount > LIMIT) reasons.push(`Over the $${LIMIT.toLocaleString(\"en-AU\")} approval limit: needs a second approver`);\n    const dup = bills.find((o, j) => j !== i && o.supplier === b.supplier &&\n      (o.invoice === b.invoice || (o.amount === b.amount && Math.abs(day(o.date) - day(b.date)) <= DUP_DAYS)));\n    if (dup && bills.indexOf(dup) < i) reasons.push(`Possible duplicate of ${dup.invoice}`);\n    if (s && s.last_unit_price && b.unit_price && b.unit_price > s.last_unit_price * (1 + PRICE_JUMP))\n      review.push(`Unit price up ${Math.round((b.unit_price / s.last_unit_price - 1) * 100)}% on the last order`);\n    const status = reasons.length ? \"Held\" : review.length ? \"Review\" : \"Ready to pay\";\n    return { ...b, status, reasons: [...reasons, ...review].join(\"; \") };\n  });\n}\n\nconst bills = $input.all().map(i => i.json);\nreturn runChecks(bills, suppliers, { approvalLimit: 10000, priceJump: 0.10, duplicateWindowDays: 30 }).map(r => ({ json: r }));"
+      },
+      "name": "Run five checks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "id": "185b757b-b6a2-453c-84b3-91d7e453b8de"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One line per status, ready for an email or Teams/Slack message. Nothing is paid here:\n// a person approves the payment run in the accounting system.\nconst rows = $input.all().map(i => i.json);\nconst total = s => rows.filter(r => r.status === s).reduce((a, r) => a + r.amount, 0);\nconst fmt = n => '$' + n.toLocaleString('en-AU');\nconst held = rows.filter(r => r.status !== 'Ready to pay').map(r => `${r.invoice} ${r.supplier} ${fmt(r.amount)}: ${r.reasons}`);\nreturn [{ json: {\n  ready_count: rows.filter(r => r.status === 'Ready to pay').length,\n  ready_total: total('Ready to pay'),\n  held_count: held.length,\n  held_total: total('Held') + total('Review'),\n  held_detail: held,\n  message: `${rows.filter(r => r.status === 'Ready to pay').length} bills (${fmt(total('Ready to pay'))}) ready for your approval. ${held.length} held for a person:\\n` + held.join('\\n')\n} }];"
+      },
+      "name": "Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "c3ede104-b9fe-4073-bc98-90db084ba7ec"
+    }
+  ],
+  "connections": {
+    "When clicking 'Test workflow'": {
+      "main": [
+        [
+          {
+            "node": "Sample bills (synthetic)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample bills (synthetic)": {
+      "main": [
+        [
+          {
+            "node": "Run five checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run five checks": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
